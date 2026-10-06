@@ -1,13 +1,6 @@
 pipeline {
     agent any
 
-    tools {
-        // Requires JDK 21 configured under Jenkins -> Global Tool Configuration (named 'jdk21')
-        // or system default OpenJDK 21
-        jdk 'jdk21'
-        maven 'maven3'
-    }
-
     options {
         buildDiscarder(logRotator(numToKeepStr: '15'))
         timestamps()
@@ -24,6 +17,7 @@ pipeline {
     environment {
         APP_NAME = 'devops-test-task'
         ANSIBLE_FORCE_COLOR = 'true'
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
         PROD_HOST = "${params.TARGET_HOST}"
     }
 
