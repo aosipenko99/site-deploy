@@ -92,7 +92,7 @@ pipeline {
                     
                     echo "Checking main page..."
                     RESPONSE=$(curl -fsS --retry 5 --retry-delay 2 -i "http://${PROD_HOST}/")
-                    echo "$RESPONSE" | grep -q "200 OK"
+                    echo "$RESPONSE" | grep -E -q "HTTP/[0-9.]+ 200"
                     echo "$RESPONSE" | grep -q "DevOps test task"
                     echo "$RESPONSE" | grep -q "main.jpg"
                     
