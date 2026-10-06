@@ -1,0 +1,125 @@
+---
+- name: Instant Rollback to Previous Deployment Slot
+  hosts: production
+  become: yes
+  tasks:
+    - name: Read current and previous slots
+      slurp:
+        src: "{{ item }}"
+      register: slot_files
+      loop:
+        - "{{ app_base_dir }}/active_slot"
+        - "{{ app_base_dir }}/previous_slot"
+
+    - name: Parse slot names
+      set_fact:
+        current_slot: "{{ slot_files.results[0].content | b64decode | trim }}"
+        rollback_slot: "{{ slot_files.results[1].content | b64decode | trim }}"
+
+    - name: Compute rollback target port
+      set_fact:
+        rollback_port: "{{ blue_port if rollback_slot == 'blue' else green_port }}"
+        current_port: "{{ green_port if rollback_slot == 'blue' else blue_port }}"
+
+    - name: Validate rollback target is different from current
+      fail:
+        msg: "Cannot rollback: previous slot is same as current slot ({{ current_slot }})."
+      when: current_slot == rollback_slot
+
+    - name: Display rollback plan
+      debug:
+        msg: "Rolling back from {{ current_slot }} (port {{ current_port }}) to {{ rollback_slot }} (port {{ rollback_port }})."
+
+    - name: Start rollback slot systemd service
+      systemd:
+        name: "devops-test-task@{{ rollback_slot }}.service"
+        state: started
+
+    - name: Wait for readiness probe on rollback slot
+      uri:
+        url: "http://127.0.0.1:{{ rollback_port }}/actuator/health/readiness"
+        status_code: 200
+        return_content: yes
+      register: rollback_readiness
+      until: rollback_readiness.status == 200 and '"UP"' in rollback_readiness.content
+      retries: 20
+      delay: 2
+
+    - name: Switch Nginx upstream back to rollback slot
+      copy:
+        dest: /etc/nginx/conf.d/devops-test-task.conf
+        content: |
+          upstream devops_test_task {
+              server 127.0.0.1:{{ rollback_port }} max_fails=3 fail_timeout=10s;
+              keepalive 32;
+          }
+
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+
+              client_max_body_size 16M;
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
+
+              location / {
+                  proxy_pass http://devops_test_task;
+                  proxy_http_version 1.1;
+                  proxy_set_header Connection "";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
+                  proxy_pass http://devops_test_task;
+                  proxy_set_header Host $host;
+                  expires 7d;
+              }
+
+              location /actuator/health {
+                  proxy_pass http://devops_test_task;
+                  proxy_set_header Host $host;
+                  access_log off;
+              }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Flush handlers to reload Nginx immediately
+      meta: flush_handlers
+
+    - name: Update active slot marker
+      copy:
+        dest: "{{ app_base_dir }}/active_slot"
+        content: "{{ rollback_slot }}\n"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Stop problematic slot service
+      systemd:
+        name: "devops-test-task@{{ current_slot }}.service"
+        state: stopped
+
+    - name: Smoke test after rollback
+      uri:
+        url: "http://127.0.0.1/"
+        status_code: 200
+        return_content: yes
+      register: rollback_smoke
+      failed_when: rollback_smoke.status != 200 or 'DevOps test task' not in rollback_smoke.content
+
+    - name: Rollback completed successfully
+      debug:
+        msg: "Successfully rolled back to slot {{ rollback_slot }} (port {{ rollback_port }})."
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

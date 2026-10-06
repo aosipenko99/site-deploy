@@ -1,0 +1,168 @@
+---
+- name: Zero-Downtime Continuous Deployment to Production
+  hosts: production
+  become: yes
+  vars:
+    jar_source: "{{ playbook_dir }}/../target/devops-test-task-1.0.0.jar"
+  tasks:
+    - name: Ensure target JAR file exists locally before deploying
+      delegate_to: localhost
+      become: no
+      stat:
+        path: "{{ jar_source }}"
+      register: jar_file_stat
+      failed_when: not jar_file_stat.stat.exists
+
+    - name: Read current active slot
+      slurp:
+        src: "{{ app_base_dir }}/active_slot"
+      register: active_slot_raw
+      ignore_errors: yes
+
+    - name: Determine current and target slot
+      set_fact:
+        current_slot: "{{ (active_slot_raw.content | b64decode | trim) if active_slot_raw is succeeded else 'green' }}"
+      
+    - name: Compute new target slot and port
+      set_fact:
+        target_slot: "{{ 'green' if current_slot == 'blue' else 'blue' }}"
+        target_port: "{{ green_port if current_slot == 'blue' else blue_port }}"
+        current_port: "{{ blue_port if current_slot == 'blue' else green_port }}"
+
+    - name: Display deployment plan
+      debug:
+        msg: "Current active slot: {{ current_slot }} (port {{ current_port }}). Deploying to target slot: {{ target_slot }} (port {{ target_port }})."
+
+    - name: Ensure target slot directory exists
+      file:
+        path: "{{ app_base_dir }}/{{ target_slot }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+
+    - name: Copy JAR artifact to target slot
+      copy:
+        src: "{{ jar_source }}"
+        dest: "{{ app_base_dir }}/{{ target_slot }}/devops-test-task.jar"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+        backup: yes
+
+    - name: Start or restart target slot systemd service
+      systemd:
+        name: "devops-test-task@{{ target_slot }}.service"
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for Spring Boot readiness probe on target slot (zero-downtime gate)
+      uri:
+        url: "http://127.0.0.1:{{ target_port }}/actuator/health/readiness"
+        status_code: 200
+        return_content: yes
+      register: readiness_response
+      until: readiness_response.status == 200 and '"UP"' in readiness_response.content
+      retries: "{{ health_check_retries }}"
+      delay: "{{ health_check_delay }}"
+
+    - name: Verify application endpoint responds on target slot
+      uri:
+        url: "http://127.0.0.1:{{ target_port }}/"
+        status_code: 200
+        return_content: yes
+      register: app_endpoint_check
+      failed_when: app_endpoint_check.status != 200 or 'DevOps test task' not in app_endpoint_check.content
+
+    - name: Update Nginx upstream configuration to point to target slot
+      copy:
+        dest: /etc/nginx/conf.d/devops-test-task.conf
+        content: |
+          upstream devops_test_task {
+              server 127.0.0.1:{{ target_port }} max_fails=3 fail_timeout=10s;
+              keepalive 32;
+          }
+
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+
+              client_max_body_size 16M;
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
+
+              location / {
+                  proxy_pass http://devops_test_task;
+                  proxy_http_version 1.1;
+                  proxy_set_header Connection "";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_connect_timeout 5s;
+                  proxy_read_timeout 30s;
+                  proxy_send_timeout 30s;
+              }
+
+              location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
+                  proxy_pass http://devops_test_task;
+                  proxy_set_header Host $host;
+                  expires 7d;
+                  add_header Cache-Control "public, no-transform";
+              }
+
+              location /actuator/health {
+                  proxy_pass http://devops_test_task;
+                  proxy_set_header Host $host;
+                  access_log off;
+              }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Flush handlers to reload Nginx immediately
+      meta: flush_handlers
+
+    - name: Update active slot marker
+      copy:
+        dest: "{{ app_base_dir }}/active_slot"
+        content: "{{ target_slot }}\n"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Record previous slot for fast rollback
+      copy:
+        dest: "{{ app_base_dir }}/previous_slot"
+        content: "{{ current_slot }}\n"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Stop old slot service to free resources
+      systemd:
+        name: "devops-test-task@{{ current_slot }}.service"
+        state: stopped
+      when: current_slot != target_slot
+
+    - name: Perform final smoke test via Nginx reverse proxy
+      uri:
+        url: "http://127.0.0.1/"
+        status_code: 200
+        return_content: yes
+      register: final_smoke_test
+      failed_when: final_smoke_test.status != 200 or 'DevOps test task' not in final_smoke_test.content
+
+    - name: Print success summary
+      debug:
+        msg: "Zero-Downtime Deployment successful! Active slot: {{ target_slot }} on port {{ target_port }} via Nginx port 80."
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

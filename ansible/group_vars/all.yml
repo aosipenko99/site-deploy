@@ -1,0 +1,18 @@
+---
+app_name: devops-test-task
+app_user: devops-app
+app_group: devops-app
+app_base_dir: /opt/devops-test-task
+app_config_dir: /etc/devops-test-task
+
+# Blue / Green zero-downtime ports
+blue_port: 8081
+green_port: 8082
+
+# Java runtime
+java_package_debian: openjdk-21-jre-headless
+java_package_rhel: java-21-openjdk-headless
+
+# Healthcheck parameters
+health_check_retries: 30
+health_check_delay: 2

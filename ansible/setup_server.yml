@@ -1,0 +1,122 @@
+---
+- name: Initial Setup and Provisioning of Production Server
+  hosts: production
+  become: yes
+  tasks:
+    - name: Update apt cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+    - name: Install required packages (Debian/Ubuntu)
+      apt:
+        name:
+          - openjdk-21-jre-headless
+          - nginx
+          - curl
+          - rsync
+          - ufw
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Install required packages (RHEL/CentOS)
+      yum:
+        name:
+          - java-21-openjdk-headless
+          - nginx
+          - curl
+          - rsync
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure app system group exists
+      group:
+        name: "{{ app_group }}"
+        state: present
+        system: yes
+
+    - name: Ensure app system user exists
+      user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        system: yes
+        home: "{{ app_base_dir }}"
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      loop:
+        - "{{ app_base_dir }}"
+        - "{{ app_base_dir }}/blue"
+        - "{{ app_base_dir }}/green"
+        - "{{ app_base_dir }}/shared"
+        - "{{ app_config_dir }}"
+
+    - name: Create slot environment files
+      copy:
+        dest: "{{ app_config_dir }}/{{ item.slot }}.env"
+        content: |
+          SERVER_PORT={{ item.port }}
+          JAVA_OPTS="-Xms256m -Xmx512m"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - { slot: 'blue', port: "{{ blue_port }}" }
+        - { slot: 'green', port: "{{ green_port }}" }
+
+    - name: Install systemd unit template
+      copy:
+        src: ../systemd/devops-test-task@.service
+        dest: /etc/systemd/system/devops-test-task@.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload systemd
+
+    - name: Create initial state file if not exists
+      copy:
+        dest: "{{ app_base_dir }}/active_slot"
+        content: "blue\n"
+        force: no
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Remove default Nginx site if present
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Deploy Nginx configuration
+      template:
+        src: ../nginx/devops-test-task.conf
+        dest: /etc/nginx/conf.d/devops-test-task.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Ensure Nginx is enabled and running
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

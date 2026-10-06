@@ -1,0 +1,26 @@
+[Unit]
+Description=DevOps Test Task Java Web Application
+After=network.target remote-fs.target syslog.target
+
+[Service]
+Type=simple
+User=devops-app
+Group=devops-app
+EnvironmentFile=-/etc/devops-test-task/app.env
+WorkingDirectory=/opt/devops-test-task/current
+ExecStart=/usr/bin/java -Xms256m -Xmx512m -jar /opt/devops-test-task/current/devops-test-task.jar
+Restart=always
+RestartSec=5
+SuccessExitStatus=143
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

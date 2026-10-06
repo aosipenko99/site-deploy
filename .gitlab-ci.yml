@@ -1,0 +1,33 @@
+# GitLab CI configuration
+# Triggers Jenkins job or runs deployment stages with commit status reporting
+
+stages:
+  - test
+  - trigger-jenkins
+
+test-job:
+  stage: test
+  image: maven:3.9.6-eclipse-temurin-21
+  script:
+    - mvn clean test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+trigger-jenkins-deployment:
+  stage: trigger-jenkins
+  image: curlimages/curl:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - echo "Triggering Jenkins Continuous Delivery Pipeline..."
+    # Replace JENKINS_URL, JOB_NAME, JENKINS_USER, JENKINS_TOKEN in GitLab CI/CD Variables
+    - |
+      if [ -n "$JENKINS_URL" ] && [ -n "$JENKINS_TOKEN" ]; then
+        curl -X POST "${JENKINS_URL}/job/${JENKINS_JOB_NAME}/buildWithParameters" \
+          --user "${JENKINS_USER}:${JENKINS_TOKEN}" \
+          --data-urlencode "ACTION=deploy" \
+          --data-urlencode "GIT_COMMIT=${CI_COMMIT_SHA}"
+      else
+        echo "Jenkins webhook variables not defined. Skipping remote trigger."
+      fi

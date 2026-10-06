@@ -1,0 +1,8 @@
+{
+  "name": "DevOps Test Task",
+  "description": "Web-приложение DevOps test task на Node.js/Express, отдающее страницу с картинкой и эндпоинты Actuator health check.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
